@@ -30,7 +30,8 @@
     "cloud123_key": "*****************************",
     "cloud123_url": "*****************************"
   },
-  "site": {
-    "bucket": "./public"
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
   }
 }

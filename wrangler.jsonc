@@ -30,7 +30,11 @@
     "cloud123_key": "*****************************",
     "cloud123_url": "*****************************"
   },
-  "site": {
-    "bucket": "./public"
+  "build": {
+    "command": "npm run build-web"
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
   }
 }

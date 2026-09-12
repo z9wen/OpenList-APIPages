@@ -1,6 +1,6 @@
 import * as local from "hono/cookie";
 import {Context} from "hono";
-import {showErr} from "../shares/message";
+import {showErr, showNetErr} from "../shares/message";
 import * as configs from "../shares/configs";
 import * as refresh from "../shares/refresh";
 import {encodeCallbackData, Secrets} from "../shares/secrets";
@@ -53,7 +53,7 @@ export async function oneToken(c: Context) {
     let login_data, client_uid, client_key, random_key, server_use;
     let driver_txt, params_all, random_uid, server_url: string = driver_map[1];
     try { // 请求参数 ====================================================================
-        if (c.env.PROXY_API.length > 3 && c.env.PROXY_API !== "null"
+        if (c.env.PROXY_API && c.env.PROXY_API.length > 3 && c.env.PROXY_API !== "null"
             && c.env.PROXY_API !== "none" && c.env.PROXY_API !== "false")
             server_url = "https://" + c.env.PROXY_API + "/token";
         login_data = <string>c.req.query('code');
@@ -92,19 +92,32 @@ export async function oneToken(c: Context) {
         const paramsString = new URLSearchParams(params_all).toString();
         let try_time: number = 5;
         let response: Response | null = null;
+        let last_err: string = "";
+        let last_status: number = 0;
         while (try_time > 0) {
             try {
                 response = await fetch(server_url, {
                     method: 'POST', body: paramsString,
                     headers: {'Content-Type': 'application/x-www-form-urlencoded',},
                 });
-                break;
+                if (response.status === 200) break;
+                // 非 200：读取响应体并继续重试（例如 Cloudflare 522 等代理/网络错误）
+                last_status = response.status;
+                last_err = await response.text();
+                try_time -= 1;
             } catch (error) {
+                last_status = 0;
+                last_err = String(error);
                 try_time -= 1;
             }
         }
-        if (!try_time || !response) return c.redirect(
-            showErr("多次尝试获取Token失败"));
+        if (!response || response.status !== 200) {
+            // 网络/代理层错误（fetch 失败或 5xx，如 Cloudflare 522）与授权配置错误（4xx）区分提示
+            if (last_status === 0 || last_status >= 500) {
+                return c.redirect(showNetErr(last_err || "多次尝试获取Token失败", client_uid, client_key));
+            }
+            return c.redirect(showErr(last_err || "多次尝试获取Token失败", client_uid, client_key));
+        }
         if (server_use == "false") {
             local.deleteCookie(c, 'client_uid');
             local.deleteCookie(c, 'client_key');
@@ -112,7 +125,14 @@ export async function oneToken(c: Context) {
         local.deleteCookie(c, 'random_key');
         local.deleteCookie(c, 'driver_txt');
         local.deleteCookie(c, 'server_use');
-        let json: Record<string, any> = await response.json();
+        // 先读取文本再安全解析，避免 body 非 JSON 时 response.json() 抛 SyntaxError
+        const rawText: string = await response.text();
+        let json: Record<string, any> = {};
+        try {
+            json = JSON.parse(rawText);
+        } catch (e) {
+            return c.redirect(showErr(`HTTP ${response.status}: ${rawText.slice(0, 200)}`, client_uid, client_key));
+        }
         if (json.token_type == "Bearer") {
             const callbackData: Secrets = {
                 access_token: json.access_token,
@@ -124,7 +144,9 @@ export async function oneToken(c: Context) {
             };
             return c.redirect("/#" + encodeCallbackData(callbackData));
         }
-        return c.redirect(showErr(json.message, client_uid, client_key));
+        // Google 错误响应通常形如 { error: "...", error_description: "..." }
+        const errMsg = json.error_description || json.error || json.message || "未知错误";
+        return c.redirect(showErr(errMsg, client_uid, client_key));
     } catch (error) {
         return c.redirect(showErr(<string>error, client_uid, client_key));
     }
@@ -145,7 +167,7 @@ export async function genToken(c: Context) {
     const clients_info: configs.Clients | undefined = configs.getInfo(c);
     const refresh_text: string | undefined = c.req.query('refresh_ui');
     let server_url: string = driver_map[1];
-    if (c.env.PROXY_API.length > 3 && c.env.PROXY_API !== "null"
+    if (c.env.PROXY_API && c.env.PROXY_API.length > 3 && c.env.PROXY_API !== "null"
         && c.env.PROXY_API !== "none" && c.env.PROXY_API !== "false")
         server_url = "https://" + c.env.PROXY_API + "/token";
     if (!clients_info) return c.json({text: "传入参数缺少"}, 500);
